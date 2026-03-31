@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  validate-sql:
+    name: Validate SQL syntax
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate SQL files parse without error
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for f in policies/*.sql; do
+            echo "Checking $f..."
+            psql -h localhost -U postgres -d testdb -f "$f" --no-psqlrc -v ON_ERROR_STOP=1 || exit 1
+          done
+          echo "All SQL files valid ✓"
