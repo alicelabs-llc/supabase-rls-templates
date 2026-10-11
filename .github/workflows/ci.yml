@@ -1,39 +1,36 @@
 name: CI
-
 on:
+  pull_request:
   push:
     branches: [main, master]
-  pull_request:
-    branches: [main, master]
-
+permissions:
+  contents: read
 jobs:
   validate-sql:
     name: Validate SQL syntax
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: testdb
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: rls_test
         ports:
           - 5432:5432
-
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ALLOW_TEST_SCHEMA_RESET: '1'
+      DATABASE_URL: postgres://postgres:test-only-password@localhost:5432/rls_test
     steps:
       - uses: actions/checkout@v4
-
-      - name: Validate SQL files parse without error
-        env:
-          PGPASSWORD: postgres
-        run: |
-          for f in policies/*.sql; do
-            echo "Checking $f..."
-            psql -h localhost -U postgres -d testdb -f "$f" --no-psqlrc -v ON_ERROR_STOP=1 || exit 1
-          done
-          echo "All SQL files valid ✓"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test

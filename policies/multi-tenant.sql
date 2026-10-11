@@ -1,55 +1,31 @@
--- ============================================================
--- Pattern: Multi-Tenant Isolation
--- Users can only access data within their organization
--- Requires: org_id column + org_members junction table
--- ============================================================
-
--- Junction table for org membership
-create table if not exists org_members (
+-- Multi-tenant example. Apply to a new reviewed schema, not blindly to production.
+-- Requires public.organizations(id), auth.users(id), public.your_table(org_id).
+-- Membership provisioning is a privileged server operation. Clients cannot join,
+-- change roles, or move membership through these policies.
+create table public.org_members (
   id uuid primary key default gen_random_uuid(),
-  org_id uuid not null references organizations(id) on delete cascade,
+  org_id uuid not null references public.organizations(id) on delete cascade,
   user_id uuid not null references auth.users(id) on delete cascade,
-  role text not null default 'member' check (role in ('owner', 'admin', 'member', 'viewer')),
-  created_at timestamptz default now(),
+  role text not null check (role in ('owner', 'admin', 'member', 'viewer')),
   unique(org_id, user_id)
 );
+create index org_members_user_org_idx on public.org_members(user_id, org_id);
+alter table public.org_members enable row level security;
+revoke all on public.org_members from anon, authenticated;
+grant select on public.org_members to authenticated;
+create policy "Read own memberships" on public.org_members
+  for select to authenticated using (user_id = (select auth.uid()));
 
--- Helper function: get user's org IDs
-create or replace function get_user_org_ids()
-returns setof uuid
-language sql
-security definer
-stable
-as $$
-  select org_id from org_members where user_id = auth.uid()
-$$;
-
--- Enable RLS
-alter table your_table enable row level security;
-
--- SELECT: users can read data from their orgs
-create policy "Tenant isolation: read"
-  on your_table for select
-  using (org_id in (select get_user_org_ids()));
-
--- INSERT: users can insert into their orgs
-create policy "Tenant isolation: insert"
-  on your_table for insert
-  with check (org_id in (select get_user_org_ids()));
-
--- UPDATE: users can update within their orgs
-create policy "Tenant isolation: update"
-  on your_table for update
-  using (org_id in (select get_user_org_ids()))
-  with check (org_id in (select get_user_org_ids()));
-
--- DELETE: only org admins/owners can delete
-create policy "Tenant isolation: delete (admin only)"
-  on your_table for delete
-  using (
-    org_id in (
-      select org_id from org_members
-      where user_id = auth.uid()
-      and role in ('owner', 'admin')
-    )
-  );
+alter table public.your_table enable row level security;
+-- Viewers can read; only members/admins/owners can write.
+create policy "Tenant read" on public.your_table for select to authenticated
+using (org_id in (select m.org_id from public.org_members m where m.user_id = (select auth.uid())));
+create policy "Tenant insert" on public.your_table for insert to authenticated
+with check (org_id in (select m.org_id from public.org_members m where m.user_id = (select auth.uid()) and m.role in ('member','admin','owner')));
+create policy "Tenant update" on public.your_table for update to authenticated
+using (org_id in (select m.org_id from public.org_members m where m.user_id = (select auth.uid()) and m.role in ('member','admin','owner')))
+with check (org_id in (select m.org_id from public.org_members m where m.user_id = (select auth.uid()) and m.role in ('member','admin','owner')));
+create policy "Tenant delete" on public.your_table for delete to authenticated
+using (org_id in (select m.org_id from public.org_members m where m.user_id = (select auth.uid()) and m.role in ('admin','owner')));
+-- UPDATE permits moving a row only between organizations where the caller can
+-- write. Add a separate immutable-org rule if your business forbids all moves.

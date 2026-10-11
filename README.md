@@ -1,155 +1,59 @@
-# supabase-rls-templates
+# Supabase RLS Templates
 
-**Production-ready Row Level Security policies for Supabase**
+Three reviewed examples for implementing row access rules, with executable isolation tests. Use them as a starting point for an application-specific integration, not as a blanket production security guarantee.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-238636?style=flat-square)](LICENSE)
-[![Language](https://img.shields.io/badge/Language-PLpgSQL-336791?style=flat-square)](/)
-[![Supabase](https://img.shields.io/badge/Supabase-Compatible-3ECF8E?style=flat-square)](https://supabase.com)
+## Included patterns
 
-Copy-paste RLS policies for the most common multi-tenant and role-based access patterns — battle-tested, annotated, and ready for production.
+| File | Access rule |
+| --- | --- |
+| [user-owns-row.sql](policies/user-owns-row.sql) | Authenticated users can read, insert, update and delete their own rows; ownership changes to another user are rejected |
+| [multi-tenant.sql](policies/multi-tenant.sql) | Organization members can read; members/admins/owners can insert and update; only admins/owners can delete; viewers are read-only |
+| [role-based.sql](policies/role-based.sql) | Global viewer/editor/admin permissions from server-controlled `app_metadata.app_role`; missing and unknown roles receive no access |
 
----
+The examples target `public.your_table`. They are **alternative patterns**, not a migration set to run together. PostgreSQL permissive policies combine with OR: adding policies to an existing table can broaden access.
 
-## Why this exists
+## Verify locally
 
-Writing Supabase RLS policies from scratch is error-prone. A single misconfigured policy can expose all rows to authenticated users. These templates give you a secure starting point with clear annotations explaining *why* each expression works the way it does.
+Node.js 22:
 
----
-
-## Included templates
-
-| Template | Pattern | Use case |
-|----------|---------|----------|
-| `rbac.sql` | Role-Based Access Control | Users have roles (`admin`, `editor`, `viewer`) per resource |
-| `multi-tenant.sql` | Multi-tenant isolation | Each row belongs to an `organization_id` |
-| `user-isolation.sql` | User-owned rows | Each user can only see their own rows |
-| `team-access.sql` | Team membership | Rows accessible to all members of a team |
-| `public-read.sql` | Public read, authenticated write | Blog posts, public listings |
-| `service-role-bypass.sql` | Service role admin bypass | Background jobs that need full access |
-
----
-
-## Quick start
-
-### User isolation (most common pattern)
-
-```sql
--- Enable RLS on your table
-ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
-
--- Users can only see their own rows
-CREATE POLICY "user_isolation_select"
-ON posts FOR SELECT
-TO authenticated
-USING (auth.uid() = user_id);
-
--- Users can only insert rows they own
-CREATE POLICY "user_isolation_insert"
-ON posts FOR INSERT
-TO authenticated
-WITH CHECK (auth.uid() = user_id);
-
--- Users can only update their own rows
-CREATE POLICY "user_isolation_update"
-ON posts FOR UPDATE
-TO authenticated
-USING (auth.uid() = user_id)
-WITH CHECK (auth.uid() = user_id);
-
--- Users can only delete their own rows
-CREATE POLICY "user_isolation_delete"
-ON posts FOR DELETE
-TO authenticated
-USING (auth.uid() = user_id);
+```sh
+npm ci --ignore-scripts
+npm test
 ```
 
-### Multi-tenant (organization isolation)
+By default tests run in ephemeral PGlite databases. CI runs the same assertions against PostgreSQL 16. The test harness creates mock `auth.uid()` and `auth.jwt()` functions and switches database roles. It tests row access rules; it does not test Supabase login, JWT verification, PostgREST or a deployed project.
 
-```sql
-ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+To use your own **disposable test database**:
 
--- Users can only access rows in their organization
-CREATE POLICY "org_isolation"
-ON documents FOR ALL
-TO authenticated
-USING (
-  organization_id = (
-    SELECT organization_id
-    FROM profiles
-    WHERE id = auth.uid()
-  )
-);
+```sh
+DATABASE_URL=postgres://... ALLOW_TEST_SCHEMA_RESET=1 npm test
 ```
 
-### RBAC (role-based access)
+Tests recreate `public` and `auth` schemas. Never point this command at a database containing application data. No hosted database is modified by the default local test command.
 
-```sql
--- Admins can do everything; editors can read/write; viewers read-only
-CREATE POLICY "rbac_select"
-ON resources FOR SELECT
-TO authenticated
-USING (
-  EXISTS (
-    SELECT 1 FROM user_roles
-    WHERE user_id = auth.uid()
-      AND role IN ('admin', 'editor', 'viewer')
-  )
-);
+## Adapt to an application
 
-CREATE POLICY "rbac_write"
-ON resources FOR INSERT
-TO authenticated
-WITH CHECK (
-  EXISTS (
-    SELECT 1 FROM user_roles
-    WHERE user_id = auth.uid()
-      AND role IN ('admin', 'editor')
-  )
-);
-```
+1. Choose one pattern and define who may perform each operation.
+2. Replace `public.your_table` with your table and add the required keys. User isolation requires `user_id`; organization isolation requires `org_id`, `public.organizations` and `auth.users`.
+3. Inspect existing policies and table/column grants before adding the template. These examples enable RLS; they do not grant access to the target application table.
+4. Provision membership or role claims through a trusted server workflow. The tenant example grants authenticated users only SELECT on their own memberships, with no client membership writes.
+5. Add application fixtures and run negative cases using authenticated and anonymous roles. Verify in a Supabase staging project before deployment.
+6. Review views, functions, background jobs and service-role code as separate access paths.
 
----
+For an existing `org_members` table, write a reviewed migration rather than executing the CREATE TABLE example. Existing data, grants, policies and helper functions require an inventory first. Older copies of this template created `get_user_org_ids()`; this version does not use a security-definer helper. Inspect its consumers before removing or restricting an existing function.
 
-## Important notes
+## Important boundaries
 
-**Always test with `auth.uid() = NULL`** — unauthenticated requests return `NULL` for `auth.uid()`. Make sure your policies don't accidentally expose rows when `user_id = NULL`.
+- Table owners, superusers and roles with BYPASSRLS are not representative of application users. Keep privileged service credentials out of clients; tests switch to restricted roles before assertions.
+- Global RBAC is intentionally not tenant isolation. Do not use it to separate customer organizations.
+- JWT metadata may remain stale until token renewal. Use a database-backed authorization design if immediate revocation is required. Do not accept `user_metadata` as an administrative role source.
+- The tenant example permits moving a row between two organizations only when the caller can write to both. Add a separate immutable-organization rule if any move must be forbidden.
+- These examples do not enforce subscriptions, quotas, billing, invitation acceptance, audit retention or authorization on every other table.
 
-**Use `USING` + `WITH CHECK` for write policies** — `USING` filters rows for SELECT/UPDATE/DELETE; `WITH CHECK` validates the new row for INSERT/UPDATE.
+## AliceLabs integration service
 
-**Service role bypasses RLS by default** — if you're using `supabase-js` server-side with the service role key, RLS is bypassed unless you explicitly use `setAuth()`.
+The commercial offer is a scoped integration service: access matrix, adapted migrations, isolation tests and a handover report. The templates remain MIT licensed. There is no paid license activation or checkout in this repository.
 
----
+Use [the integration brief](docs/INTEGRATION-BRIEF.md) to define the application, roles, tenants and acceptance criteria. Request a proposal through [contacto@alicelabs.site](mailto:contacto@alicelabs.site); scope, price and delivery terms must be agreed before work starts.
 
-## File layout
-
-```
-policies/
-  rbac.sql
-  multi-tenant.sql
-  user-isolation.sql
-  team-access.sql
-  public-read.sql
-  service-role-bypass.sql
-tests/
-  rbac.test.sql        # pgTAP tests
-  multi-tenant.test.sql
-```
-
----
-
-## Contributing
-
-Additional patterns welcome: invite-based access, time-limited rows, geographic restrictions, etc.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
-
----
-
-## License
-
-MIT — free to use in commercial projects.
-
----
-
-**Built by [AliceLabs LLC](https://alicelabs.site)**  
-[contacto@alicelabs.site](mailto:contacto@alicelabs.site)
+[Contributing](CONTRIBUTING.md) · [License](LICENSE)
